@@ -268,12 +268,7 @@ pwsh ./scripts/build_all.ps1
 
 #### GitHub Actions による自動ビルド & Releases 公開
 
-本リポジトリには [.github/workflows/release.yml](.github/workflows/release.yml) が設定されています。`v*` タグをプッシュすると、Windows / Ubuntu / CentOS の3環境向けパッケージが自動ビルドされ、GitHub Releases に公開されます。
-
-```bash
-git tag v0.1.0
-git push origin v0.1.0
-```
+本リポジトリには [.github/workflows/release.yml](.github/workflows/release.yml) が設定されています。[pyproject.toml](pyproject.toml) の `version`（例: `version = "0.1.0"`）を変更して `main` ブランチへプッシュ（または Actions タブから手動実行）すると、自動的に `v<version>`（例: `v0.1.0`）をリリースタグとして Windows / Ubuntu / CentOS の3環境向けパッケージがビルドされ、GitHub Releases に公開されます。
 
 ---
 

@@ -170,6 +170,8 @@ def main() -> int:
         "rich._unicode_data",
         "--collect-all",
         "curl_cffi",
+        "--copy-metadata",
+        "vdl",
     ]
 
     if args.onefile:
