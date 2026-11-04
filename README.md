@@ -23,7 +23,7 @@
 
 ## インストール・導入方法 (Installation)
 
-[GitHub Releases](../../releases) ページから、お使いのOSに対応するアーカイブをダウンロードして展開するだけで利用できます。
+[GitHub Releases](https://github.com/BettyJP/video-downloader/releases) ページから、お使いのOSに対応するアーカイブをダウンロードして展開するだけで利用できます。
 
 ### 1. Windows (Windows 10 / 11 / Server x86_64)
 
@@ -31,7 +31,7 @@ Releases から `vdl-windows-x86_64.zip` をダウンロードし、任意のフ
 
 ```powershell
 # PowerShell でダウンロード・展開する例
-Invoke-WebRequest -Uri "https://github.com/<OWNER>/<REPO>/releases/latest/download/vdl-windows-x86_64.zip" -OutFile "vdl-windows-x86_64.zip"
+Invoke-WebRequest -Uri "https://github.com/BettyJP/video-downloader/releases/latest/download/vdl-windows-x86_64.zip" -OutFile "vdl-windows-x86_64.zip"
 Expand-Archive -Path "vdl-windows-x86_64.zip" -DestinationPath "."
 
 # バージョン確認
@@ -44,7 +44,7 @@ Releases から `vdl-ubuntu-x86_64.tar.gz` をダウンロードして展開し�
 
 ```bash
 # ダウンロードと展開
-curl -LO "https://github.com/<OWNER>/<REPO>/releases/latest/download/vdl-ubuntu-x86_64.tar.gz"
+curl -LO "https://github.com/BettyJP/video-downloader/releases/latest/download/vdl-ubuntu-x86_64.tar.gz"
 tar -xzf vdl-ubuntu-x86_64.tar.gz
 
 # バージョン確認
@@ -61,7 +61,7 @@ CentOS系の `glibc` バージョンに合わせてビルドされた `vdl-cento
 
 ```bash
 # ダウンロードと展開
-curl -LO "https://github.com/<OWNER>/<REPO>/releases/latest/download/vdl-centos-x86_64.tar.gz"
+curl -LO "https://github.com/BettyJP/video-downloader/releases/latest/download/vdl-centos-x86_64.tar.gz"
 tar -xzf vdl-centos-x86_64.tar.gz
 
 # バージョン確認

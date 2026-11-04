@@ -30,6 +30,11 @@ dev = [
     "pyinstaller>=6.8.0",
 ]
 
+[project.urls]
+Homepage = "https://github.com/BettyJP/video-downloader"
+Repository = "https://github.com/BettyJP/video-downloader"
+Releases = "https://github.com/BettyJP/video-downloader/releases"
+
 [project.scripts]
 vdl = "vdl.cli:main"
 
