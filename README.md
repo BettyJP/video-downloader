@@ -184,6 +184,10 @@ vdl "https://example.com/watch/12345" --use-browser --headed -v
 | `--write-thumbnail` | なし | `False` | 動画のサムネイル画像をディスクに保存（`.jpg` / `.png` / `.webp` 等） |
 | `--skip-download` | なし | `False` | 動画本体のダウンロードをスキップ（`--write-thumbnail` との併用でサムネイルのみ取得） |
 | `-F`, `--list-formats` | なし | `False` | ダウンロードせず、検出されたストリームフォーマット一覧を表示して終了 |
+| `-j`, `--dump-json` | なし | `False` | ダウンロードせず、動画メタデータ（タイトル・サムネイル・フォーマット等）をJSON形式で標準出力へ出力 |
+| `--dump-html` | なし | `False` | TLS偽装（Cloudflare 403回避）を用いて取得した生HTMLを標準出力へ出力 |
+| `--get-title` | なし | `False` | 動画タイトルのみを標準出力へ出力 |
+| `--get-thumbnail` | なし | `False` | サムネイル画像のURLのみを標準出力へ出力 |
 | `--cookies` | `PATH` | `None` | Netscape形式のCookieファイル（`cookies.txt`）のパス |
 | `--use-browser` | なし | `False` | Playwright ヘッドレスブラウザによるネットワーク通信キャプチャを優先使用 |
 | `--headed` | なし | `False` | `--use-browser` 時にブラウザ画面を表示モード（非ヘッドレス）で起動 |

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 import sys
 from typing import Sequence
@@ -12,7 +13,7 @@ from rich.table import Table
 from vdl import __version__
 from vdl.config import DEFAULT_USER_AGENT, DownloadConfig
 from vdl.downloader import DownloadManager
-from vdl.extractors import ExtractorManager
+from vdl.extractors import CustomSiteExtractor, ExtractorManager
 from vdl.models import MediaInfo
 from vdl.utils.logger import console, setup_logger
 
@@ -116,6 +117,27 @@ def build_parser() -> argparse.ArgumentParser:
         help="List all detected video stream formats without downloading.",
     )
     parser.add_argument(
+        "-j",
+        "--dump-json",
+        action="store_true",
+        help="Print extracted metadata and stream formats as JSON to stdout without downloading.",
+    )
+    parser.add_argument(
+        "--dump-html",
+        action="store_true",
+        help="Fetch and print raw page HTML to stdout using TLS impersonation (bypasses Cloudflare 403).",
+    )
+    parser.add_argument(
+        "--get-title",
+        action="store_true",
+        help="Print only the extracted video title to stdout without downloading.",
+    )
+    parser.add_argument(
+        "--get-thumbnail",
+        action="store_true",
+        help="Print only the extracted thumbnail URL to stdout without downloading.",
+    )
+    parser.add_argument(
         "-v",
         "--verbose",
         action="store_true",
@@ -186,7 +208,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
-    logger = setup_logger(verbose=args.verbose)
+    is_stdout_query = bool(
+        args.dump_json or args.dump_html or args.get_title or args.get_thumbnail
+    )
+    logger = setup_logger(verbose=args.verbose, quiet=is_stdout_query)
 
     try:
         target_urls = collect_target_urls(args.urls, args.input_file)
@@ -197,6 +222,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not target_urls:
         parser.print_help()
         return 1
+
+    effective_skip_download = bool(args.skip_download or is_stdout_query)
 
     config = DownloadConfig(
         output_template=args.output,
@@ -212,18 +239,57 @@ def main(argv: Sequence[str] | None = None) -> int:
         ffmpeg_path=args.ffmpeg_location,
         no_ytdlp_fallback=args.no_ytdlp,
         write_thumbnail=args.write_thumbnail,
-        skip_download=args.skip_download,
+        skip_download=effective_skip_download,
         info_only=args.list_formats,
         verbose=args.verbose,
     )
 
     extractor_manager = ExtractorManager(config)
     download_manager = DownloadManager(config)
+    html_fetcher = CustomSiteExtractor(config)
 
     failures = 0
     for url in target_urls:
         try:
+            if args.dump_html:
+                page_html, _ = html_fetcher.fetch_text(url)
+                sys.stdout.buffer.write(page_html.encode("utf-8"))
+                sys.stdout.buffer.write(b"\n")
+                sys.stdout.buffer.flush()
+                continue
+
             media_info = extractor_manager.extract(url)
+            if args.dump_json:
+                payload = {
+                    "id": media_info.video_id,
+                    "title": media_info.title,
+                    "webpage_url": media_info.url,
+                    "thumbnail": media_info.thumbnail,
+                    "extractor": media_info.extractor,
+                    "formats": [
+                        {
+                            "format_id": f.format_id,
+                            "url": f.url,
+                            "ext": f.ext,
+                            "stream_type": f.stream_type.value,
+                            "quality": f.quality,
+                            "width": f.width,
+                            "height": f.height,
+                            "bandwidth": f.bandwidth,
+                        }
+                        for f in media_info.formats
+                    ],
+                }
+                sys.stdout.buffer.write(
+                    (json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8")
+                )
+                sys.stdout.buffer.flush()
+            if args.get_title:
+                sys.stdout.buffer.write((media_info.title + "\n").encode("utf-8"))
+                sys.stdout.buffer.flush()
+            if args.get_thumbnail and media_info.thumbnail:
+                sys.stdout.buffer.write((media_info.thumbnail + "\n").encode("utf-8"))
+                sys.stdout.buffer.flush()
             if config.info_only:
                 print_formats_table(media_info)
             if config.write_thumbnail:

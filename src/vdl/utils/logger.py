@@ -7,17 +7,21 @@ from rich.console import Console
 from rich.logging import RichHandler
 
 console = Console()
+stderr_console = Console(stderr=True)
 
 
-def setup_logger(verbose: bool = False) -> logging.Logger:
+def setup_logger(verbose: bool = False, quiet: bool = False) -> logging.Logger:
     """Initializes the application logger with Rich formatting."""
-    level = logging.DEBUG if verbose else logging.INFO
+    if quiet and not verbose:
+        level = logging.ERROR
+    else:
+        level = logging.DEBUG if verbose else logging.INFO
     logger = logging.getLogger("vdl")
     logger.setLevel(level)
 
     if not logger.handlers:
         handler = RichHandler(
-            console=console,
+            console=stderr_console if quiet else console,
             show_time=verbose,
             show_path=verbose,
             rich_tracebacks=True,
