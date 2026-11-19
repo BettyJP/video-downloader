@@ -81,6 +81,7 @@ class BaseExtractor(ABC):
                     else None,
                     timeout=self.config.timeout_sec,
                     allow_redirects=True,
+                    verify=False,
                 )
                 resp.raise_for_status()
                 resp_headers = {k.lower(): v for k, v in resp.headers.items()}

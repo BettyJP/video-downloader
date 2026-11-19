@@ -68,6 +68,44 @@ class HlsDownloader:
             )
             return self._download_via_ffmpeg(stream_format.url, headers, cookies, output_path)
 
+    def _http_get(
+        self,
+        client: httpx.Client,
+        url: str,
+        headers: dict[str, str],
+        cookies: dict[str, str],
+    ) -> tuple[bytes, str, str]:
+        """Fetches `url` using curl_cffi (TLS fingerprint impersonation) with httpx fallback.
+
+        Returns `(content_bytes, text_decoded, final_url)`.
+        """
+        if self.config.impersonate:
+            try:
+                from curl_cffi import requests as curl_requests
+
+                resp = curl_requests.get(
+                    url,
+                    headers=headers,
+                    cookies=cookies,
+                    impersonate=self.config.impersonate,
+                    proxies={"http": self.config.proxy, "https": self.config.proxy}
+                    if self.config.proxy
+                    else None,
+                    timeout=max(self.config.timeout_sec, 60.0),
+                    allow_redirects=True,
+                    verify=False,
+                )
+                resp.raise_for_status()
+                return resp.content, resp.text, str(resp.url)
+            except ImportError:
+                pass
+            except Exception as exc:
+                logger.debug(f"curl_cffi HLS fetch failed ({exc}); retrying with httpx")
+
+        resp = client.get(url)
+        resp.raise_for_status()
+        return resp.content, resp.text, str(resp.url)
+
     def _download_hls_native(
         self,
         m3u8_url: str,
@@ -89,7 +127,9 @@ class HlsDownloader:
                 max_keepalive_connections=max(10, self.config.concurrency),
             ),
         ) as client:
-            playlist_url, playlist_text = self._resolve_media_playlist(client, m3u8_url)
+            playlist_url, playlist_text = self._resolve_media_playlist(
+                client, m3u8_url, headers, cookies
+            )
             init_map_url, segments = self._parse_media_playlist(playlist_url, playlist_text)
 
             if not segments:
@@ -106,9 +146,8 @@ class HlsDownloader:
             def get_aes_key(key_uri: str) -> bytes:
                 with key_lock:
                     if key_uri not in key_cache:
-                        resp = client.get(key_uri)
-                        resp.raise_for_status()
-                        key_cache[key_uri] = resp.content
+                        key_bytes, _, _ = self._http_get(client, key_uri, headers, cookies)
+                        key_cache[key_uri] = key_bytes
                     return key_cache[key_uri]
 
             with tempfile.TemporaryDirectory(prefix="vdl_hls_") as tmp_dir_str:
@@ -117,9 +156,7 @@ class HlsDownloader:
 
                 init_bytes = b""
                 if init_map_url:
-                    resp = client.get(init_map_url)
-                    resp.raise_for_status()
-                    init_bytes = resp.content
+                    init_bytes, _, _ = self._http_get(client, init_map_url, headers, cookies)
 
                 segment_files: list[Path] = [
                     tmp_dir / f"seg_{seg.index:05d}.ts" for seg in segments
@@ -143,11 +180,7 @@ class HlsDownloader:
                         max_attempts = 6
                         for attempt in range(max_attempts):
                             try:
-                                resp = client.get(seg.url)
-                                if resp.status_code in (429, 500, 502, 503, 504):
-                                    resp.raise_for_status()
-                                resp.raise_for_status()
-                                data = resp.content
+                                data, _, _ = self._http_get(client, seg.url, headers, cookies)
 
                                 if seg.key_url:
                                     key_bytes = get_aes_key(seg.key_url)
@@ -191,15 +224,19 @@ class HlsDownloader:
         return output_path
 
     def _resolve_media_playlist(
-        self, client: httpx.Client, m3u8_url: str
+        self,
+        client: httpx.Client,
+        m3u8_url: str,
+        headers: dict[str, str] | None = None,
+        cookies: dict[str, str] | None = None,
     ) -> tuple[str, str]:
         """Fetches the m3u8 URL and resolves the highest bandwidth variant if it is a master playlist."""
-        resp = client.get(m3u8_url)
-        resp.raise_for_status()
-        text = resp.text
+        _, text, resolved_url = self._http_get(
+            client, m3u8_url, headers or {}, cookies or {}
+        )
 
         if "#EXT-X-STREAM-INF" not in text:
-            return str(resp.url), text
+            return resolved_url, text
 
         best_score = (-1, -1, -1)
         best_uri: str | None = None
@@ -224,15 +261,16 @@ class HlsDownloader:
                         score = (pixels, h, bw)
                         if score > best_score:
                             best_score = score
-                            best_uri = urljoin(str(resp.url), next_line)
+                            best_uri = urljoin(resolved_url, next_line)
                         break
 
         if not best_uri:
             raise ValueError(f"Could not resolve variant stream in master playlist: {m3u8_url}")
 
-        sub_resp = client.get(best_uri)
-        sub_resp.raise_for_status()
-        return str(sub_resp.url), sub_resp.text
+        _, sub_text, sub_url = self._http_get(
+            client, best_uri, headers or {}, cookies or {}
+        )
+        return sub_url, sub_text
 
     @staticmethod
     def _parse_media_playlist(
@@ -354,6 +392,8 @@ class HlsDownloader:
             "-y",
             "-loglevel",
             "warning" if self.config.verbose else "error",
+            "-tls_verify",
+            "0",
             "-headers",
             header_lines,
         ]

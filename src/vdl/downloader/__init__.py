@@ -111,6 +111,7 @@ class DownloadManager:
                     else None,
                     timeout=self.config.timeout_sec,
                     allow_redirects=True,
+                    verify=False,
                 )
                 resp.raise_for_status()
                 ct = (resp.headers.get("content-type") or "").split(";")[0].strip().lower()
