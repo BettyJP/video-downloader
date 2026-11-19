@@ -12,6 +12,9 @@ from vdl.utils.paths import format_output_path, sanitize_filename
 def test_sanitize_filename() -> None:
     assert sanitize_filename('My: "Video" <Test>?*|\\/') == "My_ _Video_ _Test______"
     assert sanitize_filename("   ") == "video"
+    long_jp = "FC2-PPV-2409469 【本日まで限定価格】杏ちゃん史上最高に性欲ヤバくて超敏感でエロ過ぎてめっちゃ可愛いくてとにかく２人で丸1日ナマでハメまくった日／初ナマ中出し＆初アナル 後編【高画質無修正】※豪華特典付き"
+    sanitized_jp = sanitize_filename(long_jp)
+    assert len(sanitized_jp.encode("utf-8")) <= 200
 
 
 def test_format_output_path_template() -> None:

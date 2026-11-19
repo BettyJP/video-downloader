@@ -94,7 +94,7 @@ def configure_playwright_browsers_path() -> None:
             break
 
 
-def sanitize_filename(name: str, max_length: int = 180) -> str:
+def sanitize_filename(name: str, max_length: int = 180, max_bytes: int = 200) -> str:
     """Sanitizes a string to be safe for use as a file name on Windows/POSIX."""
     if not name:
         return "video"
@@ -102,7 +102,11 @@ def sanitize_filename(name: str, max_length: int = 180) -> str:
     cleaned = re.sub(r"\s+", " ", cleaned)
     if not cleaned:
         return "video"
-    return cleaned[:max_length].rstrip(" .")
+    cleaned = cleaned[:max_length].rstrip(" .")
+    if max_bytes > 0 and len(cleaned.encode("utf-8")) > max_bytes:
+        encoded = cleaned.encode("utf-8")[:max_bytes]
+        cleaned = encoded.decode("utf-8", errors="ignore").rstrip(" .")
+    return cleaned or "video"
 
 
 def format_output_path(

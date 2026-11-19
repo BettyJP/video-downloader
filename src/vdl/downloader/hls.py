@@ -6,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -83,6 +84,10 @@ class HlsDownloader:
             timeout=httpx.Timeout(self.config.timeout_sec, read=60.0),
             follow_redirects=True,
             verify=False,
+            limits=httpx.Limits(
+                max_connections=max(20, self.config.concurrency * 2),
+                max_keepalive_connections=max(10, self.config.concurrency),
+            ),
         ) as client:
             playlist_url, playlist_text = self._resolve_media_playlist(client, m3u8_url)
             init_map_url, segments = self._parse_media_playlist(playlist_url, playlist_text)
@@ -135,9 +140,12 @@ class HlsDownloader:
                     )
 
                     def fetch_segment(seg: HlsSegment, dest: Path) -> None:
-                        for attempt in range(4):
+                        max_attempts = 6
+                        for attempt in range(max_attempts):
                             try:
                                 resp = client.get(seg.url)
+                                if resp.status_code in (429, 500, 502, 503, 504):
+                                    resp.raise_for_status()
                                 resp.raise_for_status()
                                 data = resp.content
 
@@ -150,10 +158,10 @@ class HlsDownloader:
                                 progress.update(task_id, advance=1)
                                 return
                             except Exception as exc:
-                                if attempt == 3:
+                                if attempt == max_attempts - 1:
                                     raise
                                 logger.debug(f"Retrying segment #{seg.index} ({exc})")
-                                time.sleep(0.8 * (attempt + 1))
+                                time.sleep(1.0 * (attempt + 1))
 
                     with ThreadPoolExecutor(max_workers=self.config.concurrency) as pool:
                         futures = [
@@ -167,7 +175,9 @@ class HlsDownloader:
                     if init_bytes:
                         out_f.write(init_bytes)
                     for seg_file in segment_files:
-                        out_f.write(seg_file.read_bytes())
+                        with seg_file.open("rb") as seg_f:
+                            shutil.copyfileobj(seg_f, out_f)
+                        seg_file.unlink(missing_ok=True)
 
                 if self.config.ffmpeg_path and self.config.ffmpeg_path.is_file():
                     self._remux_to_mp4(merged_ts_path, output_path)
@@ -175,7 +185,7 @@ class HlsDownloader:
                     logger.warning(
                         "ffmpeg not found; saving concatenated transport stream directly."
                     )
-                    output_path.write_bytes(merged_ts_path.read_bytes())
+                    shutil.copyfile(merged_ts_path, output_path)
 
         logger.info(f"[green][HlsDownloader][/green] Saved to: {output_path}")
         return output_path
@@ -317,7 +327,7 @@ class HlsDownloader:
         result = subprocess.run(cmd, capture_output=True, text=True, check=False)
         if result.returncode != 0:
             logger.debug(f"FFmpeg remux stderr: {result.stderr}")
-            output_mp4.write_bytes(input_ts.read_bytes())
+            shutil.copyfile(input_ts, output_mp4)
 
     def _download_via_ffmpeg(
         self,
@@ -339,13 +349,15 @@ class HlsDownloader:
 
         header_lines = "".join(f"{k}: {v}\r\n" for k, v in req_headers.items())
 
-        cmd = [
+        base_cmd = [
             str(self.config.ffmpeg_path),
             "-y",
             "-loglevel",
             "warning" if self.config.verbose else "error",
             "-headers",
             header_lines,
+        ]
+        tail_cmd = [
             "-i",
             stream_url,
             "-c",
@@ -356,8 +368,27 @@ class HlsDownloader:
             "+faststart",
             str(output_path),
         ]
+
         logger.info(f"[cyan][FFmpeg][/cyan] Downloading stream to: {output_path.name}")
-        result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        if ".m3u8" in stream_url.lower():
+            # FFmpeg 7.1+/8.0+/9.0+ restricts HLS segment extensions (e.g. .jpeg disguised TS segments)
+            ext_flags_candidates = [
+                ["-allowed_extensions", "ALL", "-allowed_segment_extensions", "ALL", "-extension_picky", "0"],
+                ["-allowed_extensions", "ALL"],
+            ]
+            result = None
+            for flags in ext_flags_candidates:
+                result = subprocess.run(
+                    base_cmd + flags + tail_cmd, capture_output=True, text=True, check=False
+                )
+                if result.returncode == 0 or "Unrecognized option" not in result.stderr:
+                    break
+            assert result is not None
+        else:
+            result = subprocess.run(
+                base_cmd + tail_cmd, capture_output=True, text=True, check=False
+            )
+
         if result.returncode != 0:
             raise RuntimeError(f"FFmpeg download failed: {result.stderr.strip()}")
         logger.info(f"[green][FFmpeg][/green] Saved to: {output_path}")
