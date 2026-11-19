@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
+import os
 from pathlib import Path
 import re
 import shutil
@@ -74,6 +75,7 @@ class HlsDownloader:
         url: str,
         headers: dict[str, str],
         cookies: dict[str, str],
+        curl_session: object | None = None,
     ) -> tuple[bytes, str, str]:
         """Fetches `url` using curl_cffi (TLS fingerprint impersonation) with httpx fallback.
 
@@ -81,20 +83,30 @@ class HlsDownloader:
         """
         if self.config.impersonate:
             try:
-                from curl_cffi import requests as curl_requests
+                if curl_session is not None:
+                    resp = curl_session.get(  # type: ignore[attr-defined]
+                        url,
+                        headers=headers,
+                        cookies=cookies,
+                        timeout=max(self.config.timeout_sec, 60.0),
+                        allow_redirects=True,
+                        verify=False,
+                    )
+                else:
+                    from curl_cffi import requests as curl_requests
 
-                resp = curl_requests.get(
-                    url,
-                    headers=headers,
-                    cookies=cookies,
-                    impersonate=self.config.impersonate,
-                    proxies={"http": self.config.proxy, "https": self.config.proxy}
-                    if self.config.proxy
-                    else None,
-                    timeout=max(self.config.timeout_sec, 60.0),
-                    allow_redirects=True,
-                    verify=False,
-                )
+                    resp = curl_requests.get(
+                        url,
+                        headers=headers,
+                        cookies=cookies,
+                        impersonate=self.config.impersonate,
+                        proxies={"http": self.config.proxy, "https": self.config.proxy}
+                        if self.config.proxy
+                        else None,
+                        timeout=max(self.config.timeout_sec, 60.0),
+                        allow_redirects=True,
+                        verify=False,
+                    )
                 resp.raise_for_status()
                 return resp.content, resp.text, str(resp.url)
             except ImportError:
@@ -114,6 +126,28 @@ class HlsDownloader:
         output_path: Path,
     ) -> Path:
         logger.info(f"[cyan][HlsDownloader][/cyan] Fetching HLS playlist: {m3u8_url}")
+
+        thread_local = threading.local()
+
+        def get_thread_curl_session() -> object | None:
+            if not self.config.impersonate:
+                return None
+            sess = getattr(thread_local, "curl_session", None)
+            if sess is None:
+                try:
+                    from curl_cffi import requests as curl_requests
+
+                    sess = curl_requests.Session(
+                        impersonate=self.config.impersonate,
+                        proxies={"http": self.config.proxy, "https": self.config.proxy}
+                        if self.config.proxy
+                        else None,
+                        verify=False,
+                    )
+                    thread_local.curl_session = sess
+                except Exception:
+                    return None
+            return sess
 
         with httpx.Client(
             headers=headers,
@@ -146,7 +180,13 @@ class HlsDownloader:
             def get_aes_key(key_uri: str) -> bytes:
                 with key_lock:
                     if key_uri not in key_cache:
-                        key_bytes, _, _ = self._http_get(client, key_uri, headers, cookies)
+                        key_bytes, _, _ = self._http_get(
+                            client,
+                            key_uri,
+                            headers,
+                            cookies,
+                            curl_session=get_thread_curl_session(),
+                        )
                         key_cache[key_uri] = key_bytes
                     return key_cache[key_uri]
 
@@ -156,7 +196,13 @@ class HlsDownloader:
 
                 init_bytes = b""
                 if init_map_url:
-                    init_bytes, _, _ = self._http_get(client, init_map_url, headers, cookies)
+                    init_bytes, _, _ = self._http_get(
+                        client,
+                        init_map_url,
+                        headers,
+                        cookies,
+                        curl_session=get_thread_curl_session(),
+                    )
 
                 segment_files: list[Path] = [
                     tmp_dir / f"seg_{seg.index:05d}.ts" for seg in segments
@@ -177,10 +223,17 @@ class HlsDownloader:
                     )
 
                     def fetch_segment(seg: HlsSegment, dest: Path) -> None:
-                        max_attempts = 6
+                        max_attempts = 8
                         for attempt in range(max_attempts):
                             try:
-                                data, _, _ = self._http_get(client, seg.url, headers, cookies)
+                                sess = get_thread_curl_session()
+                                data, _, _ = self._http_get(
+                                    client,
+                                    seg.url,
+                                    headers,
+                                    cookies,
+                                    curl_session=sess,
+                                )
 
                                 if seg.key_url:
                                     key_bytes = get_aes_key(seg.key_url)
@@ -191,26 +244,49 @@ class HlsDownloader:
                                 progress.update(task_id, advance=1)
                                 return
                             except Exception as exc:
+                                # Reset thread session on connection error
+                                thread_local.curl_session = None
                                 if attempt == max_attempts - 1:
                                     raise
                                 logger.debug(f"Retrying segment #{seg.index} ({exc})")
                                 time.sleep(1.0 * (attempt + 1))
 
+                    failed_segments: list[int] = []
                     with ThreadPoolExecutor(max_workers=self.config.concurrency) as pool:
-                        futures = [
-                            pool.submit(fetch_segment, seg, segment_files[i])
+                        future_to_idx = {
+                            pool.submit(fetch_segment, seg, segment_files[i]): i
                             for i, seg in enumerate(segments)
-                        ]
-                        for fut in as_completed(futures):
-                            fut.result()
+                        }
+                        for fut in as_completed(future_to_idx):
+                            seg_i = future_to_idx[fut]
+                            try:
+                                fut.result()
+                            except Exception as exc:
+                                failed_segments.append(seg_i)
+                                logger.warning(
+                                    f"Segment #{seg_i} failed after {8} retries: {exc}"
+                                )
+
+                    # Allow download to succeed if >= 98% of segments succeeded (or <3 failed)
+                    if failed_segments:
+                        max_tolerable = max(2, len(segments) // 50)
+                        if len(failed_segments) > max_tolerable:
+                            raise RuntimeError(
+                                f"{len(failed_segments)}/{len(segments)} HLS segments failed to download"
+                            )
+                        logger.warning(
+                            f"Proceeding with {len(segments) - len(failed_segments)}/{len(segments)} segments "
+                            f"({len(failed_segments)} missing segment(s) skipped)."
+                        )
 
                 with merged_ts_path.open("wb") as out_f:
                     if init_bytes:
                         out_f.write(init_bytes)
                     for seg_file in segment_files:
-                        with seg_file.open("rb") as seg_f:
-                            shutil.copyfileobj(seg_f, out_f)
-                        seg_file.unlink(missing_ok=True)
+                        if seg_file.is_file():
+                            with seg_file.open("rb") as seg_f:
+                                shutil.copyfileobj(seg_f, out_f)
+                            seg_file.unlink(missing_ok=True)
 
                 if self.config.ffmpeg_path and self.config.ffmpeg_path.is_file():
                     self._remux_to_mp4(merged_ts_path, output_path)
@@ -397,6 +473,18 @@ class HlsDownloader:
             "-headers",
             header_lines,
         ]
+        # Discover system CA bundle (e.g. CentOS / RHEL /etc/pki/tls/certs/ca-bundle.crt)
+        # for static Linux FFmpeg binaries compiled with a Debian default CA path.
+        ca_bundle_candidates = (
+            "/etc/pki/tls/certs/ca-bundle.crt",
+            "/etc/ssl/certs/ca-certificates.crt",
+            "/etc/ssl/ca-bundle.pem",
+            "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem",
+        )
+        ca_file = next((p for p in ca_bundle_candidates if Path(p).is_file()), None)
+        if ca_file:
+            base_cmd.extend(["-ca_file", ca_file])
+
         tail_cmd = [
             "-i",
             stream_url,
@@ -409,24 +497,60 @@ class HlsDownloader:
             str(output_path),
         ]
 
+        env = os.environ.copy()
+        if ca_file:
+            env.setdefault("SSL_CERT_FILE", ca_file)
+
         logger.info(f"[cyan][FFmpeg][/cyan] Downloading stream to: {output_path.name}")
         if ".m3u8" in stream_url.lower():
             # FFmpeg 7.1+/8.0+/9.0+ restricts HLS segment extensions (e.g. .jpeg disguised TS segments)
+            # Also pass tls_verify=0 inside seg_format_options so child segment requests inherit it.
+            seg_opts = "tls_verify=0"
+            if ca_file:
+                seg_opts += f":ca_file={ca_file}"
             ext_flags_candidates = [
-                ["-allowed_extensions", "ALL", "-allowed_segment_extensions", "ALL", "-extension_picky", "0"],
+                [
+                    "-allowed_extensions",
+                    "ALL",
+                    "-allowed_segment_extensions",
+                    "ALL",
+                    "-extension_picky",
+                    "0",
+                    "-seg_format_options",
+                    seg_opts,
+                ],
+                [
+                    "-allowed_extensions",
+                    "ALL",
+                    "-allowed_segment_extensions",
+                    "ALL",
+                    "-extension_picky",
+                    "0",
+                ],
                 ["-allowed_extensions", "ALL"],
             ]
             result = None
             for flags in ext_flags_candidates:
                 result = subprocess.run(
-                    base_cmd + flags + tail_cmd, capture_output=True, text=True, check=False
+                    base_cmd + flags + tail_cmd,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    env=env,
                 )
-                if result.returncode == 0 or "Unrecognized option" not in result.stderr:
+                if result.returncode == 0 or (
+                    "Unrecognized option" not in result.stderr
+                    and "Option not found" not in result.stderr
+                ):
                     break
             assert result is not None
         else:
             result = subprocess.run(
-                base_cmd + tail_cmd, capture_output=True, text=True, check=False
+                base_cmd + tail_cmd,
+                capture_output=True,
+                text=True,
+                check=False,
+                env=env,
             )
 
         if result.returncode != 0:
