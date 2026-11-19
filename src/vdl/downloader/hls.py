@@ -244,9 +244,15 @@ class HlsDownloader:
                                 progress.update(task_id, advance=1)
                                 return
                             except Exception as exc:
+                                err_str = str(exc)
+                                # Fast-fail on permanent HTTP 403/404/410 on individual broken CDN segments
+                                if any(code in err_str for code in ("403", "404", "410")) and attempt >= 1:
+                                    progress.update(task_id, advance=1)
+                                    raise
                                 # Reset thread session on connection error
                                 thread_local.curl_session = None
                                 if attempt == max_attempts - 1:
+                                    progress.update(task_id, advance=1)
                                     raise
                                 logger.debug(f"Retrying segment #{seg.index} ({exc})")
                                 time.sleep(1.0 * (attempt + 1))
